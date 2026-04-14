@@ -55,7 +55,13 @@ export async function getAccessToken(): Promise<string> {
 
   const clientId = await envvars.retrieve("ZOHO_CLIENT_ID");
   const clientSecret = await envvars.retrieve("ZOHO_CLIENT_SECRET");
-  const refreshToken = await envvars.retrieve("ZOHO_REFRESH_TOKEN");
+  // Try CRM-specific token first, fall back to Analytics token
+  let refreshToken: { value: string };
+  try {
+    refreshToken = await envvars.retrieve("ZOHO_REFRESH_TOKEN");
+  } catch {
+    refreshToken = await envvars.retrieve("ZOHO_ANALYTICS_REFRESH_TOKEN");
+  }
 
   const response = await fetch(
     `https://accounts.zoho.com/oauth/v2/token?` +
