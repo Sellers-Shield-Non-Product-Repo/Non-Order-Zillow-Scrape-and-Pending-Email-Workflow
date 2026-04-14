@@ -1,8 +1,7 @@
 import { defineConfig } from "@trigger.dev/sdk/v3";
 
 export default defineConfig({
-  // TODO: Replace with your new trigger.dev project ID
-  project: "proj_REPLACE_ME",
+  project: "proj_xtftaswjunfdksyaqstl",
   runtime: "node",
   logLevel: "log",
   maxDuration: 14400, // 4 hours — larger report than PC version
