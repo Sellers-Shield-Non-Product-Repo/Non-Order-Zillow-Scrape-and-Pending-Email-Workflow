@@ -40,8 +40,17 @@ async function getGoogleAccessToken(): Promise<string> {
   // Use individual env vars (email + private key) — same pattern as other automations
   const email = (await envvars.retrieve("GOOGLE_SERVICE_ACCOUNT_EMAIL")).value;
   const rawKey = (await envvars.retrieve("GOOGLE_PRIVATE_KEY")).value;
-  // Env vars often store \n as literal two-char sequences — convert to real newlines
-  const privateKey = rawKey.replace(/\\n/g, "\n");
+  // Normalize PEM key: handle literal \n, missing newlines, surrounding quotes
+  let privateKey = rawKey.replace(/^"|"$/g, "").replace(/\\n/g, "\n");
+  // If the key is a single line (no real newlines between header and content), reconstruct PEM
+  if (!privateKey.includes("\n") || privateKey.match(/-----BEGIN[^-]+-----[^\n]/)) {
+    const b64 = privateKey
+      .replace(/-----BEGIN [A-Z ]+-----/, "")
+      .replace(/-----END [A-Z ]+-----/, "")
+      .replace(/\s/g, "");
+    const lines = b64.match(/.{1,64}/g) || [];
+    privateKey = `-----BEGIN PRIVATE KEY-----\n${lines.join("\n")}\n-----END PRIVATE KEY-----\n`;
+  }
   const credentials: ServiceAccountCredentials = {
     client_email: email,
     private_key: privateKey,
