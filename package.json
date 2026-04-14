@@ -1,0 +1,25 @@
+{
+  "name": "zillow-bulk-non-pc",
+  "version": "1.0.0",
+  "description": "Bulk Zillow property scraping for non-PC report on trigger.dev, with Zoho CRM updates",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx trigger.dev@latest dev",
+    "deploy": "npx trigger.dev@latest deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@trigger.dev/sdk": "^4.4.4",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@trigger.dev/build": "^4.4.4",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
