@@ -534,23 +534,76 @@ function mapScraperResult(data: Record<string, unknown>, url: string): ZillowPro
     };
   }
 
-  const rawStatus = (data.homeStatus || data.home_status || null) as string | null;
-  const status = rawStatus ? mapPropertyStatus(rawStatus) : null;
+  let rawStatus = (data.homeStatus || data.home_status || null) as string | null;
+  let status = rawStatus ? mapPropertyStatus(rawStatus) : null;
 
-  // Status date: prefer dateSold for sold properties, datePosted for active/pending
+  // Pending/contingent override — Zillow's homeStatus often stays "FOR_SALE"
+  // even when the listing is actually under contract. Check the same signals
+  // that the HTML parser uses (isPending flag, contingentListingType field)
+  // so the structured-API path doesn't silently mis-classify pending listings.
+  const subType = data.listingSubType as Record<string, unknown> | null | undefined;
+  const isPendingFlag =
+    data.isPending === true ||
+    data.is_pending === true ||
+    (subType && (subType.isPending === true || subType.is_pending === true));
+  const contingentType =
+    (data.contingentListingType as string | null | undefined) ||
+    (data.contingent_listing_type as string | null | undefined) ||
+    (subType?.contingentListingType as string | null | undefined);
+
+  if (isPendingFlag) {
+    console.log(
+      `[Zillow Scraper] Pending override: homeStatus="${rawStatus}" but isPending=true`
+    );
+    rawStatus = "PENDING";
+    status = "Pending";
+  } else if (contingentType) {
+    console.log(
+      `[Zillow Scraper] Contingent override: homeStatus="${rawStatus}" but contingentListingType="${contingentType}"`
+    );
+    rawStatus = `CONTINGENT:${contingentType}`;
+    status = "Active Contingent";
+  }
+
+  // Status date: use most recent price history event, then fall back based on status
   let statusDate: string | null = null;
-  if (data.dateSoldString) {
-    statusDate = normalizeDate(String(data.dateSoldString));
-  } else if (data.dateSold) {
-    if (typeof data.dateSold === "number") {
-      const ts = data.dateSold;
-      const ms = ts > 9999999999 ? ts : ts * 1000;
-      statusDate = normalizeDate(new Date(ms).toISOString());
-    } else {
-      statusDate = normalizeDate(String(data.dateSold));
+
+  // 1. Best source: most recent priceHistory entry
+  if (Array.isArray(data.priceHistory) && data.priceHistory.length > 0) {
+    const sorted = [...data.priceHistory]
+      .filter((e: Record<string, unknown>) => e.date || e.time)
+      .sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
+        const da = new Date(String(a.date || a.time)).getTime();
+        const db = new Date(String(b.date || b.time)).getTime();
+        return db - da; // most recent first
+      });
+    if (sorted.length > 0) {
+      const newest = sorted[0] as Record<string, unknown>;
+      statusDate = normalizeDate(String(newest.date || newest.time));
     }
-  } else if (data.datePosted) {
-    statusDate = normalizeDate(String(data.datePosted));
+  }
+
+  // 2. Fallback: datePosted for active/pending, dateSold only for sold
+  if (!statusDate) {
+    const isSold = status === "Sold" || status === "Off Market";
+    if (isSold) {
+      if (data.dateSoldString) {
+        statusDate = normalizeDate(String(data.dateSoldString));
+      } else if (data.dateSold) {
+        if (typeof data.dateSold === "number") {
+          const ts = data.dateSold;
+          const ms = ts > 9999999999 ? ts : ts * 1000;
+          statusDate = normalizeDate(new Date(ms).toISOString());
+        } else {
+          statusDate = normalizeDate(String(data.dateSold));
+        }
+      }
+    } else {
+      // Active/Pending/For Sale — prefer datePosted
+      if (data.datePosted) {
+        statusDate = normalizeDate(String(data.datePosted));
+      }
+    }
   }
 
   // Price: could be number or formatted string

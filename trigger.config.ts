@@ -4,7 +4,7 @@ export default defineConfig({
   project: "proj_xtftaswjunfdksyaqstl",
   runtime: "node",
   logLevel: "log",
-  maxDuration: 14400, // 4 hours — larger report than PC version
+  maxDuration: 86400, // 24 hours — large 40k+ record dataset
   retries: {
     enabledInDev: true,
     default: {

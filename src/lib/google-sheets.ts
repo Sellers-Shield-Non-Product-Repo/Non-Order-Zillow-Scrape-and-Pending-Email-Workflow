@@ -18,6 +18,8 @@ export interface PropertyReportRow {
   matchScore: number;
   matchFlags: string[];
   error: string | null;
+  pendingEmailScheduled: boolean;
+  pendingEmailScheduledFor: string | null;
 }
 
 // ----- Google Auth (zero-dependency JWT) -----
@@ -125,12 +127,177 @@ async function sheetsApi(
   return response.json();
 }
 
+// Tabs older than the most-recent N runs are deleted at the start of each run
+// to keep the workbook under Google's 10,000,000-cell hard limit. Each run
+// writes ~750k cells across its two tabs, so keeping ~5 runs (10 tabs) leaves
+// generous headroom. Override via SHEET_MAX_REPORT_TABS.
+const DEFAULT_MAX_REPORT_TABS = 10;
+
+const REPORT_TAB_REGEX = /^(High Confidence|Review Queue)\s+(\d{1,2})\/(\d{1,2})\/(\d{2})\s+(\d{1,2}):(\d{2})([ap])/;
+
+/**
+ * Parse a sortable timestamp from a report tab title like
+ * "High Confidence 5/18/26 8:07p". Returns null if the title isn't a report tab.
+ */
+function parseReportTabTimestamp(title: string): number | null {
+  const m = title.match(REPORT_TAB_REGEX);
+  if (!m) return null;
+  const [, , mm, dd, yy, hh, min, ap] = m;
+  let hour = Number(hh) % 12;
+  if (ap === "p") hour += 12;
+  // 2-digit year → 2000s
+  return new Date(
+    2000 + Number(yy),
+    Number(mm) - 1,
+    Number(dd),
+    hour,
+    Number(min)
+  ).getTime();
+}
+
+/**
+ * Delete old "High Confidence" / "Review Queue" tabs, keeping only the most
+ * recent `keep` of them. Best-effort: logs and continues on any error so a
+ * prune failure never blocks the actual report write. Non-report tabs (e.g.
+ * a manually-created sheet) are never touched.
+ */
+export async function pruneOldReportTabs(
+  spreadsheetId: string,
+  keep: number
+): Promise<void> {
+  try {
+    const meta = (await sheetsApi(
+      `/${spreadsheetId}?fields=sheets.properties(sheetId,title)`,
+      "GET"
+    )) as { sheets?: Array<{ properties: { sheetId: number; title: string } }> };
+
+    const reportTabs = (meta.sheets || [])
+      .map((s) => ({
+        sheetId: s.properties.sheetId,
+        title: s.properties.title,
+        ts: parseReportTabTimestamp(s.properties.title),
+      }))
+      .filter((s): s is { sheetId: number; title: string; ts: number } => s.ts !== null)
+      .sort((a, b) => b.ts - a.ts); // newest first
+
+    const toDelete = reportTabs.slice(keep);
+    if (toDelete.length === 0) {
+      console.log(`Tab prune: ${reportTabs.length} report tabs, none to delete (keeping ${keep})`);
+      return;
+    }
+
+    console.log(
+      `Tab prune: ${reportTabs.length} report tabs found, deleting ${toDelete.length} oldest (keeping ${keep})`
+    );
+
+    await sheetsApi(`/${spreadsheetId}:batchUpdate`, "POST", {
+      requests: toDelete.map((s) => ({ deleteSheet: { sheetId: s.sheetId } })),
+    });
+    console.log(`Tab prune: deleted ${toDelete.map((s) => s.title).join(", ")}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    console.error(`Tab prune failed (continuing anyway): ${msg}`);
+  }
+}
+
+// Persistent tab that accumulates one row per weekly run for week-over-week
+// tracking. Never pruned (doesn't match REPORT_TAB_REGEX).
+const WEEKLY_SUMMARY_TAB = "Weekly Summary";
+
+const WEEKLY_SUMMARY_HEADERS = [
+  "Run Date",
+  "Total Checked",
+  "High Confidence",
+  "High %",
+  "Review Queue",
+  "New Status Updates",
+  "Status Breakdown",
+  "New Pendings",
+  "Spreadsheet Status",
+];
+
+export interface WeeklySummaryRow {
+  runDate: string;
+  totalChecked: number;
+  highConfidence: number;
+  highPct: number;
+  reviewQueue: number;
+  totalStatusUpdates: number;
+  statusBreakdown: Map<string, number>;
+  newPendings: number;
+  spreadsheetError?: string | null;
+}
+
+/**
+ * Append a single row to the persistent "Weekly Summary" tab, creating the tab
+ * (with headers) on first use. Best-effort: logs and continues on error.
+ */
+export async function appendWeeklySummary(row: WeeklySummaryRow): Promise<void> {
+  try {
+    const spreadsheetId = (await envvars.retrieve("GOOGLE_SPREADSHEET_ID")).value;
+
+    // Ensure the tab exists; create it with a header row if missing.
+    const meta = (await sheetsApi(
+      `/${spreadsheetId}?fields=sheets.properties(title)`,
+      "GET"
+    )) as { sheets?: Array<{ properties: { title: string } }> };
+
+    const exists = (meta.sheets || []).some(
+      (s) => s.properties.title === WEEKLY_SUMMARY_TAB
+    );
+
+    if (!exists) {
+      await sheetsApi(`/${spreadsheetId}:batchUpdate`, "POST", {
+        requests: [{ addSheet: { properties: { title: WEEKLY_SUMMARY_TAB } } }],
+      });
+      await sheetsApi(
+        `/${spreadsheetId}/values/${encodeURIComponent(`'${WEEKLY_SUMMARY_TAB}'!A1`)}?valueInputOption=RAW`,
+        "PUT",
+        { values: [WEEKLY_SUMMARY_HEADERS] }
+      );
+      console.log(`Created "${WEEKLY_SUMMARY_TAB}" tab with headers`);
+    }
+
+    const breakdownText = [...row.statusBreakdown.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([status, count]) => `${status}: ${count}`)
+      .join("; ");
+
+    const values = [
+      [
+        row.runDate,
+        row.totalChecked,
+        row.highConfidence,
+        `${row.highPct}%`,
+        row.reviewQueue,
+        row.totalStatusUpdates,
+        breakdownText,
+        row.newPendings,
+        row.spreadsheetError ? `FAILED: ${row.spreadsheetError}` : "OK",
+      ],
+    ];
+
+    await sheetsApi(
+      `/${spreadsheetId}/values/${encodeURIComponent(`'${WEEKLY_SUMMARY_TAB}'!A1`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+      "POST",
+      { values }
+    );
+    console.log(`Appended weekly summary row for ${row.runDate}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    console.error(`Weekly summary append failed (continuing anyway): ${msg}`);
+  }
+}
+
 // ----- Public API -----
 
 /**
  * Write results to a Google Spreadsheet, creating new dated tabs each run:
  *   - "High Confidence M/D/YY"
  *   - "Review Queue M/D/YY"
+ *
+ * Old report tabs are pruned first (keeping the most recent N) so the workbook
+ * stays under Google's 10M-cell limit.
  *
  * Returns the spreadsheet URL.
  */
@@ -141,6 +308,18 @@ export async function writePropertyReport(
   const spreadsheetId = (
     await envvars.retrieve("GOOGLE_SPREADSHEET_ID")
   ).value;
+
+  // Prune old tabs BEFORE creating new ones, so we free cells first (this also
+  // self-heals a workbook that's already at the cell limit).
+  let maxTabs = DEFAULT_MAX_REPORT_TABS;
+  try {
+    const override = (await envvars.retrieve("SHEET_MAX_REPORT_TABS")).value;
+    const parsed = parseInt(override, 10);
+    if (!Number.isNaN(parsed) && parsed > 0) maxTabs = parsed;
+  } catch {
+    // env var not set — use default
+  }
+  await pruneOldReportTabs(spreadsheetId, maxTabs);
 
   // Format date as M/D/YY H:MMa (e.g. "3/25/26 2:45p") to allow multiple runs per day
   const now = new Date();

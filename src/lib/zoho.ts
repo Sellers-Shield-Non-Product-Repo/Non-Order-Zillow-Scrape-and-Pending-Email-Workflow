@@ -73,7 +73,10 @@ export async function getAccessToken(): Promise<string> {
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to refresh Zoho token: ${response.status}`);
+    const errorText = await response.text().catch(() => "(no body)");
+    throw new Error(
+      `Failed to refresh Zoho token: ${response.status} - ${errorText}`
+    );
   }
 
   const data: ZohoTokenResponse = await response.json();
@@ -388,6 +391,152 @@ export async function fetchRecentOrders(): Promise<ZohoRecord[]> {
   return records;
 }
 
+/**
+ * Fetch one or more field values from a Zoho CRM record.
+ * Returns a map keyed by field name; values are strings for populated fields
+ * and null when empty/unset/missing.
+ */
+export async function getRecordFields(
+  recordId: string,
+  fields: string[]
+): Promise<Record<string, string | null>> {
+  const accessToken = await getAccessToken();
+  const module = (await envvars.retrieve("ZOHO_MODULE")).value || "Orders";
+
+  const fieldsParam = fields.join(",");
+
+  const response = await fetch(
+    `https://www.zohoapis.com/crm/v2/${module}/${recordId}?fields=${encodeURIComponent(fieldsParam)}`,
+    {
+      headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+    }
+  );
+
+  if (response.status === 204 || response.status === 404) {
+    return Object.fromEntries(fields.map((f) => [f, null]));
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Failed to fetch fields [${fieldsParam}] for record ${recordId}: ${response.status} - ${errorText}`
+    );
+  }
+
+  const data = await response.json();
+  const result: Record<string, string | null> = {};
+  for (const field of fields) {
+    const value = data?.data?.[0]?.[field];
+    result[field] =
+      value === null || value === undefined || value === ""
+        ? null
+        : String(value);
+  }
+  return result;
+}
+
+/**
+ * Convenience wrapper around getRecordFields for fetching a single field.
+ */
+export async function getRecordField(
+  recordId: string,
+  field: string
+): Promise<string | null> {
+  const fields = await getRecordFields(recordId, [field]);
+  return fields[field];
+}
+
+/**
+ * List all fields (with their API names and display names) for the configured
+ * Zoho CRM module. Useful for discovering exact field API names without
+ * guessing capitalization.
+ */
+export async function listModuleFields(): Promise<
+  Array<{ api_name: string; field_label: string; data_type: string }>
+> {
+  const accessToken = await getAccessToken();
+  const module = (await envvars.retrieve("ZOHO_MODULE")).value || "Orders";
+
+  const response = await fetch(
+    `https://www.zohoapis.com/crm/v2/settings/fields?module=${encodeURIComponent(module)}`,
+    {
+      headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Failed to list module fields: ${response.status} - ${errorText}`
+    );
+  }
+
+  const data = await response.json();
+  return (data?.fields || []) as Array<{
+    api_name: string;
+    field_label: string;
+    data_type: string;
+  }>;
+}
+
+/**
+ * Find a record ID by email using Zoho's search API.
+ */
+export async function searchRecordIdByEmail(email: string): Promise<string | null> {
+  const accessToken = await getAccessToken();
+  const module = (await envvars.retrieve("ZOHO_MODULE")).value || "Orders";
+
+  const criteria = `(Email:equals:${email})`;
+  const url = `https://www.zohoapis.com/crm/v2/${module}/search?criteria=${encodeURIComponent(criteria)}`;
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+  });
+
+  if (response.status === 204) return null;
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Failed to search by email ${email}: ${response.status} - ${errorText}`
+    );
+  }
+
+  const data = await response.json();
+  return (data?.data?.[0]?.id as string) || null;
+}
+
+/**
+ * Fetch a full Zoho CRM record (all fields) by ID. Useful for discovering
+ * actual field API names when the metadata endpoint isn't sufficient.
+ */
+export async function getFullRecord(
+  recordId: string
+): Promise<Record<string, unknown> | null> {
+  const accessToken = await getAccessToken();
+  const module = (await envvars.retrieve("ZOHO_MODULE")).value || "Orders";
+
+  const response = await fetch(
+    `https://www.zohoapis.com/crm/v2/${module}/${recordId}`,
+    {
+      headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+    }
+  );
+
+  if (response.status === 204 || response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Failed to fetch full record ${recordId}: ${response.status} - ${errorText}`
+    );
+  }
+
+  const data = await response.json();
+  return (data?.data?.[0] || null) as Record<string, unknown> | null;
+}
+
 export async function updateRecord(
   recordId: string,
   data: Record<string, unknown>
@@ -407,12 +556,15 @@ export async function updateRecord(
     }
   );
 
+  const responseBody = await response.text();
+
   if (!response.ok) {
-    const errorText = await response.text();
-    console.error(`Failed to update record ${recordId}: ${errorText}`);
+    console.error(`Failed to update record ${recordId}: ${responseBody}`);
     return false;
   }
 
+  // Log the actual Zoho response to catch silent field rejections
+  console.log(`Zoho CRM update response for ${recordId}: ${responseBody}`);
   return true;
 }
 

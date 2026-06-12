@@ -40,7 +40,7 @@ src/
 
 ### Task Flow
 
-1. **zillow-non-pc-report** (scheduled cron, Wednesdays 6 AM Central) — Fetches non-PC report from Zoho Analytics, processes all properties with 30 concurrent workers
+1. **zillow-non-pc-report** (scheduled cron, Mondays 6 AM Central) — Fetches non-PC report from Zoho Analytics, processes all properties across 8 parallel batches (~20 concurrent workers each)
 2. **manual-non-pc-report** (manual trigger) — Same flow but supports `maxRecords` limit for testing
 
 ### Key Difference from PC Version
@@ -86,7 +86,21 @@ Set in trigger.dev dashboard (Environment Variables section):
 | `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Google service account email |
 | `GOOGLE_PRIVATE_KEY` | Google service account private key |
 | `GOOGLE_SPREADSHEET_ID` | Target Google Spreadsheet ID |
+| `SLACK_AUTOMATION_REPORTS_WEBHOOK_URL` | Slack incoming webhook for #automation-reports run summaries |
+| `SHEET_MAX_REPORT_TABS` | (optional) Max dated report tabs to retain; older ones are pruned each run. Default 10. |
 
 ## Zoho CRM Field Mappings
 
 Updates write to: `Zillow_URL`, `List_Price`, `Bedrooms`, `Bathrooms`, `Square_Feet`, `Property_Status`.
+
+### New-pending email trigger
+
+When a high-confidence Zillow scrape returns status `Pending`, the job stamps the DateTime field `SST_Pending_Email_Offer` on the Zoho Order — but only if (a) the field is currently empty AND (b) `HSLP_upsell_purchased_at` is also empty (no point sending an HSLP order email to a seller who already ordered). Both fields are read in a single `getRecordFields` call per candidate. Because populating this field triggers a seller email in Zoho, the actual stamp is performed by a delayed child task (`update-pending-email-offer`) scheduled at a random business-hour moment over the next ~36 hours, so emails are spread out instead of arriving in one burst. Business hours default to 8am–6pm `America/Chicago` (see `src/lib/scheduling.ts`).
+
+### Slack run summary
+
+At the end of every scheduled and manual run, the job posts a summary to the `automation-reports` Slack channel via `SLACK_AUTOMATION_REPORTS_WEBHOOK_URL`. Includes total records checked, high-confidence count + %, count of new status updates (high-confidence rows where Zillow status differs from Zoho's `currentStatus`) with a per-status breakdown, and the count of new pendings whose `SST_Pending_Email_Offer` was scheduled. The Slack post is isolated from the spreadsheet write — if the sheet write fails, the summary still posts and includes a ⚠️ note with the spreadsheet error.
+
+### Spreadsheet tab pruning
+
+Each run writes two new dated tabs ("High Confidence …", "Review Queue …"). Google Sheets caps a workbook at 10,000,000 cells, and each run adds ~750k cells, so old tabs are pruned at the **start** of every run (before new tabs are created) — keeping only the most recent `SHEET_MAX_REPORT_TABS` (default 10). Pruning is best-effort and parses the date/time from tab titles; non-report tabs are never touched. See `pruneOldReportTabs` in `src/lib/google-sheets.ts`.
