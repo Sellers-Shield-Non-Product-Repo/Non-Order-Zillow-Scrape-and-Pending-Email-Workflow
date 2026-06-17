@@ -551,10 +551,11 @@ async function postRunSummary(
   }
 }
 
-// Main scheduled task — every Monday at 6 AM Central Time
+// Scheduled task — cron removed 2026-06-16 to stop automatic runs.
+// Task is retained (can still be triggered manually); no declarative schedule
+// is registered, so it will not run on a cron after the next deploy.
 export const zillowNonPcReport = schedules.task({
   id: "zillow-non-pc-report",
-  cron: { pattern: "0 6 * * 1", timezone: "America/Chicago" },
   run: async () => {
     console.log("Starting non-PC Zillow property status report...");
 
